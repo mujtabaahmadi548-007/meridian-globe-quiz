@@ -3,12 +3,14 @@
 A guess-the-country game on a rotating 3D globe, built with three.js, d3-geo and topojson.
 
 ## Modes
-- **Locate** – a country is named; click it on the globe. Near misses score by distance.
+- **Locate** – a country is named; click it on the globe.
 - **Identify** – a country lights up; name it (multiple choice on Easy, typing with autocomplete on Medium/Hard).
 - **Flags** – a flag is shown; click its country.
 - **Explore** – no score; search or click any country for facts.
 
 ## Features
+- Wrong guesses never reveal the answer: you get a distance clue (warm/cold) and keep trying, or skip and the answer stays hidden
+- Each wrong try lowers the round's points
 - 195 countries, 3 difficulty levels, region filter (World, Africa, Americas, Asia, Europe, Oceania), 5/10/20 rounds
 - Speed and streak bonuses, paid hints, best scores saved in the browser
 - Works with mouse, touch and keyboard (Enter = next, 1–4 = answer on Easy)

@@ -108,6 +108,13 @@ button{cursor:pointer;border:0;background:none}
 .hint:disabled{opacity:.4;cursor:default}
 .hints-out{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--fg)}
 .hints-out:empty{display:none}
+.feedback{display:flex;align-items:center;gap:10px;font-size:14.5px;padding:9px 12px;border-radius:10px;background:rgba(255,111,97,.1);border:1px solid rgba(255,111,97,.35)}
+.feedback:empty{display:none}
+.feedback.warm{background:rgba(242,181,68,.1);border-color:rgba(242,181,68,.4)}
+.feedback b{font-weight:700}
+.feedback .worth{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+@keyframes shake{20%,60%{transform:translateX(-5px)}40%,80%{transform:translateX(5px)}}
+.feedback.shake{animation:shake .35s}
 .hints-out div::before{content:"› ";color:var(--brass)}
 .instr{font-size:13px;color:var(--muted);margin-left:auto;display:flex;gap:6px;align-items:center}
 .instr svg{width:14px;height:14px}
@@ -814,7 +821,7 @@ function hintDefs(f) {
 function nextRound() {
   if (state.i >= state.queue.length) return endGame();
   const f = state.queue[state.i];
-  state.target = f; state.hints = []; state.hintCost = 0; state.guess = null; state.phase = "ask"; state.t0 = performance.now();
+  state.target = f; state.hints = []; state.hintCost = 0; state.guess = null; state.tries = 0; state.triedIds = new Set(); state.wrongFills = []; state.phase = "ask"; state.t0 = performance.now();
   clearFx(); setFills([]); hideTip();
   updateStats();
   const dock = $("#dock");
@@ -830,7 +837,7 @@ function nextRound() {
       const opts = choicesFor(f);
       answerHtml = `<div class="choices">${opts.map((o, i) => `<button class="choice" data-id="${o.id}"><kbd>${i + 1}</kbd>${esc(o.m.n)}</button>`).join("")}</div>`;
     } else {
-      answerHtml = `<div class="answer"><input id="ans" type="text" autocomplete="off" spellcheck="false" placeholder="Type a country…" aria-label="Country name"><button class="ghost" id="skip">Pass</button><button class="primary" id="submit">Guess</button><ul class="sugg" id="sugg" role="listbox" hidden></ul></div>`;
+      answerHtml = `<div class="answer"><input id="ans" type="text" autocomplete="off" spellcheck="false" placeholder="Type a country…" aria-label="Country name"><button class="ghost" id="skip">Skip</button><button class="primary" id="submit">Guess</button><ul class="sugg" id="sugg" role="listbox" hidden></ul></div>`;
     }
   }
   dock.innerHTML = `
@@ -839,7 +846,8 @@ function nextRound() {
     ${promptHtml}
     ${answerHtml}
     <div class="hintrow">${hints.map(h => `<button class="hint" data-k="${h.k}">${h.label}<small>−${h.cost}</small></button>`).join("")}
-      ${mode !== "identify" ? `<button class="ghost" id="skip" style="height:34px;margin-left:auto;font-size:13px">Pass</button>` : ""}</div>
+      ${mode !== "identify" ? `<button class="ghost" id="skip" style="height:34px;margin-left:auto;font-size:13px">Skip</button>` : ""}</div>
+    <div class="feedback" id="fb" role="status"></div>
     <div class="hints-out" id="hintsOut"></div>
     <div class="timer" title="Speed bonus"><i id="timerBar"></i></div>`;
   show("dock");
@@ -860,8 +868,8 @@ function nextRound() {
     if (state.diff === 1) {
       dock.querySelectorAll(".choice").forEach(b => b.addEventListener("click", () => {
         const g = byId[b.dataset.id];
-        dock.querySelectorAll(".choice").forEach(c => { c.disabled = true; if (c.dataset.id === f.id) c.classList.add("right"); else if (c === b) c.classList.add("wrong"); });
-        setTimeout(() => resolve({ named: g }), 450);
+        if (g === f) { dock.querySelectorAll(".choice").forEach(c => c.disabled = true); b.classList.add("right"); setTimeout(() => resolve({ named: g }), 380); }
+        else { b.disabled = true; b.classList.add("wrong"); resolve({ named: g }); }
       }));
     } else {
       const inp = $("#ans");
@@ -961,77 +969,87 @@ function onGlobeClick(x, y) {
   }
 }
 
+const TRY_COST = { locate: 200, flag: 200, identify: 250 };
+function worthNow() { return Math.max(0, 1000 - state.tries * TRY_COST[state.mode] - state.hintCost); }
+function showMiss(html, warm) {
+  const fb = $("#fb"); if (!fb) return;
+  fb.className = "feedback" + (warm ? " warm" : "");
+  fb.innerHTML = `${html}<span class="worth">now worth ${fmt(worthNow())}</span>`;
+  void fb.offsetWidth; fb.classList.add("shake");
+  requestAnimationFrame(layoutOffset);
+}
 function resolve(r) {
   if (state.phase !== "ask") return;
+  const f = state.target;
+  // ---- wrong guesses: keep the round open, never reveal the target ----
+  if (!r.pass) {
+    if (state.mode === "identify" && r.named !== f) {
+      if (state.triedIds.has(r.named.id)) { toast(`You already tried ${r.named.m.n}.`); return; }
+      state.triedIds.add(r.named.id); state.tries++;
+      sfx.bad();
+      showMiss(`<span>Not <b>${esc(r.named.m.n)}</b>. Try again.</span>`);
+      const inp = $("#ans"); if (inp) { inp.value = ""; inp.focus({ preventScroll: true }); }
+      return;
+    }
+    if (state.mode !== "identify" && r.clicked !== f) {
+      const key = r.clicked ? r.clicked.id : null;
+      if (key && state.triedIds.has(key)) { toast(`You already tried ${r.clicked.m.n}.`); return; }
+      if (key) state.triedIds.add(key);
+      state.tries++;
+      const km = kmToCountry(r.click, f);
+      const warm = km < 800;
+      (warm ? sfx.mid : sfx.bad)();
+      pin(r.click[0], r.click[1], 0xff6f61);
+      if (r.clicked) { state.wrongFills = (state.wrongFills || []).concat({ f: r.clicked, color: "#FF6F61", alpha: 0.42 }); setFills(state.wrongFills); }
+      const where = r.clicked ? `Not <b>${esc(r.clicked.m.n)}</b>` : "That's open water";
+      const heat = km < 300 ? "Very close" : km < 800 ? "Warm" : km < 2000 ? "Getting colder" : "Far off";
+      showMiss(`<span>${where}. ${heat}: <b class="mono">${fmt(km)} km</b> away.</span>`, warm);
+      return;
+    }
+  }
+  // ---- round finished: found it, or skipped ----
   cancelAnimationFrame(timerRAF);
   state.phase = "reveal";
   canvas.classList.remove("pick");
-  const f = state.target, elapsed = (performance.now() - state.t0) / 1000;
-  const bonus = Math.round(200 * Math.max(0, 1 - elapsed / 30));
-  let correct = false, km = null, base = 0, verdictTxt = "", sub = "", kind = "no", guessName = "";
-  clearFx();
-  if (state.mode === "identify") {
-    correct = r.named === f;
-    guessName = r.pass ? "Passed" : r.named ? r.named.m.n : "";
-    base = correct ? 1000 : 0;
-    verdictTxt = correct ? "Correct" : r.pass ? "Passed" : "Not quite";
-    sub = correct ? `That's ${f.m.n}.` : `It's ${f.m.n}${r.named && !r.pass ? `, not ${r.named.m.n}` : ""}.`;
-    const fl = [{ f, color: correct ? "#46D79A" : "#F2B544", alpha: 0.7 }];
-    if (!correct && r.named && r.named !== f) {
-      fl.push({ f: r.named, color: "#FF6F61", alpha: 0.6 }); outline(r.named, 0xff8a7e);
-      arc(r.named.label, f.label, 0xffd27a);
-    }
-    setFills(fl); outline(f, correct ? 0x7dffc0 : 0xffd27a);
-    if (f.mainSr < 0.0006) ring(f.label[0], f.label[1], correct ? 0x46d79a : 0xf2b544, Math.max(0.03, f.rad * 1.6));
-    if (!correct && r.named && r.named !== f) {
-      const d = d3.geoDistance(r.named.label, f.label), mid = d3.geoInterpolate(r.named.label, f.label)(0.5);
-      flyTo(mid[0], mid[1], distFor(Math.max(f.rad, d * 0.62)), 1300);
-    }
-  } else {
-    if (r.pass) { correct = false; km = null; guessName = "Passed"; verdictTxt = "Passed"; sub = `${f.m.n} is here.`; }
-    else {
-      const clicked = r.clicked;
-      correct = clicked === f;
-      km = correct ? 0 : kmToCountry(r.click, f);
-      guessName = clicked ? clicked.m.n : "Open ocean";
-      if (correct) { base = 1000; verdictTxt = "Bullseye"; sub = `You found ${f.m.n}.`; }
-      else {
-        base = Math.round(500 * Math.exp(-km / 650));
-        kind = km < 500 ? "mid" : "no";
-        verdictTxt = km < 300 ? "So close" : km < 1500 ? "Near miss" : "Off course";
-        sub = `You picked ${guessName}. ${f.m.n} was ${fmt(km)} km away.`;
-      }
-      pin(r.click[0], r.click[1], correct ? 0x46d79a : 0xff6f61);
-    }
-    const fl = [{ f, color: correct ? "#46D79A" : "#F2B544", alpha: 0.72 }];
-    if (!correct && r.clicked && r.clicked !== f) { fl.push({ f: r.clicked, color: "#FF6F61", alpha: 0.5 }); }
-    setFills(fl);
-    outline(f, correct ? 0x7dffc0 : 0xffd27a);
-    if (f.mainSr < 0.0006) ring(f.label[0], f.label[1], correct ? 0x46d79a : 0xf2b544, Math.max(0.03, f.rad * 1.6));
-    if (!r.pass && !correct) {
-      arc(r.click, f.label, 0xffd27a);
-      const d = d3.geoDistance(r.click, f.label), mid = d3.geoInterpolate(r.click, f.label)(0.5);
-      flyTo(mid[0], mid[1], distFor(Math.max(f.rad, d * 0.62)), 1400);
-    } else flyTo(f.label[0], f.label[1], distFor(f.rad), 1300);
-  }
-  if (correct) kind = "ok";
-  const pts = Math.max(0, base - state.hintCost) + (correct ? bonus + Math.min(state.streak, 5) * 50 : 0);
-  state.streak = correct ? state.streak + 1 : 0;
+  const elapsed = (performance.now() - state.t0) / 1000;
+  const correct = !r.pass;
+  const firstTry = correct && state.tries === 0;
+  const bonus = correct ? Math.round(200 * Math.max(0, 1 - elapsed / 30)) : 0;
+  const base = correct ? Math.max(0, 1000 - state.tries * TRY_COST[state.mode]) : 0;
+  const streakBonus = firstTry ? Math.min(state.streak, 5) * 50 : 0;
+  const pts = correct ? Math.max(0, base - state.hintCost) + bonus + streakBonus : 0;
+  state.streak = firstTry ? state.streak + 1 : 0;
   state.score += pts;
-  state.results.push({ f, correct, pts, km, guessName, kind });
+  const kind = firstTry ? "ok" : correct ? "mid" : "no";
+  state.results.push({ f, correct, firstTry, tries: state.tries, pts, kind });
+  state.wrongFills = [];
   updateStats();
-  (correct ? sfx.good : kind === "mid" ? sfx.mid : sfx.bad)();
-  const m = f.m;
+  clearFx();
+  if (correct) {
+    setFills([{ f, color: "#46D79A", alpha: 0.7 }]);
+    outline(f, 0x7dffc0);
+    if (f.mainSr < 0.0006) ring(f.label[0], f.label[1], 0x46d79a, Math.max(0.03, f.rad * 1.6));
+    if (state.mode !== "identify") pin(r.click[0], r.click[1], 0x46d79a);
+    flyTo(f.label[0], f.label[1], distFor(f.rad), 1200);
+    (firstTry ? sfx.good : sfx.mid)();
+  } else {
+    setFills([]); sfx.bad();
+  }
+  const verdictTxt = !correct ? "Skipped" : firstTry ? (state.mode === "identify" ? "Correct" : "Bullseye") : "Found it";
+  const triesTxt = state.tries ? ` after ${state.tries} wrong ${state.tries === 1 ? "try" : "tries"}` : " on the first try";
+  const sub = !correct
+    ? (state.mode === "locate" ? `${f.m.n} stays hidden. Find it next time.` : "The answer stays hidden. Find it next time.")
+    : `${state.mode === "identify" ? `It's ${f.m.n}` : `You found ${f.m.n}`}${triesTxt}.`;
   const breakdown = [];
-  if (base) breakdown.push(`${fmt(base)} ${correct ? "base" : "proximity"}`);
-  if (state.hintCost) breakdown.push(`−${state.hintCost} hints`);
-  if (correct && bonus) breakdown.push(`+${bonus} speed`);
-  if (correct && state.streak > 1) breakdown.push(`+${Math.min(state.streak - 1, 5) * 50} streak`);
+  if (correct) breakdown.push(`${fmt(base)} base`);
+  if (correct && state.hintCost) breakdown.push(`−${state.hintCost} hints`);
+  if (bonus) breakdown.push(`+${bonus} speed`);
+  if (streakBonus) breakdown.push(`+${streakBonus} streak`);
   const last = state.i + 1 >= state.queue.length;
   $("#dock").innerHTML = `
     <div class="verdict"><div class="badge ${kind}">${ICON[kind]}</div><div style="min-width:0"><h2>${verdictTxt}</h2><p>${esc(sub)}</p></div>
       <div class="pts"><strong>+${fmt(pts)}</strong><span>${breakdown.join(" · ") || "no points"}</span></div></div>
-    ${factsHtml(f)}
+    ${correct ? factsHtml(f) : ""}
     <div class="next"><span class="keyhint">Enter ↵</span><button class="primary" id="nextBtn">${last ? "See results" : "Next"} ${ICON.arrow}</button></div>`;
   show("dock");
   $("#nextBtn").addEventListener("click", () => { state.i++; nextRound(); });
@@ -1052,21 +1070,27 @@ function factsHtml(f) {
 
 function endGame() {
   state.phase = "end"; clearFx(); setFills([]); auto = true;
-  const n = state.results.length, hits = state.results.filter(r => r.correct).length;
-  const misses = state.results.filter(r => !r.correct && r.km != null);
+  const n = state.results.length;
   const prevBest = state.best, isBest = state.score > prevBest;
   if (isBest) setBest(state.score);
   sfx.end();
+  const found = state.results.filter(r => r.correct).length, first = state.results.filter(r => r.firstTry).length;
+  const wrongTries = state.results.reduce((a, r) => a + r.tries, 0);
+  const label = r => {
+    if (r.correct) return `${esc(r.f.m.n)}${r.tries ? ` <em>· ${r.tries} wrong ${r.tries === 1 ? "try" : "tries"}</em>` : ""}`;
+    return state.mode === "locate" ? `${esc(r.f.m.n)} <em>· skipped</em>` : `<em>Hidden · skipped</em>`;
+  };
+  const thumb = r => (state.mode === "identify" && !r.correct) || !flagUrl[r.f.id] ? "<span></span>" : `<img src="${flagUrl[r.f.id]}" alt="">`;
   $("#end").innerHTML = `
     <div><div class="eyebrow">${MODES[state.mode].name} · ${DIFFS[state.diff - 1].name} · ${state.region}</div>
-    <h2 style="margin-top:8px">${hits === n ? "Flawless" : hits / n >= 0.7 ? "Well charted" : hits / n >= 0.4 ? "Getting there" : "Lost at sea"}</h2></div>
+    <h2 style="margin-top:8px">${first === n ? "Flawless" : first / n >= 0.7 ? "Well charted" : found / n >= 0.6 ? "Getting there" : "Lost at sea"}</h2></div>
     <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap"><div class="total">${fmt(state.score)}</div><div class="eyebrow" style="padding-bottom:10px">${isBest ? "New best" : prevBest ? `Best ${fmt(prevBest)}` : ""}</div></div>
     <div class="sum">
-      <div><span>Correct</span><strong>${hits}/${n}</strong></div>
-      <div><span>Accuracy</span><strong>${Math.round(hits / n * 100)}%</strong></div>
-      <div><span>${state.mode === "identify" ? "Max streak" : "Avg miss"}</span><strong>${state.mode === "identify" ? maxStreak() : misses.length ? fmt(misses.reduce((a, r) => a + r.km, 0) / misses.length) + " km" : "—"}</strong></div>
+      <div><span>Found</span><strong>${found}/${n}</strong></div>
+      <div><span>First try</span><strong>${first}</strong></div>
+      <div><span>Wrong tries</span><strong>${wrongTries}</strong></div>
     </div>
-    <ol class="log">${state.results.map((r, i) => `<li><span class="${r.kind}">${ICON[r.kind]}</span>${flagUrl[r.f.id] ? `<img src="${flagUrl[r.f.id]}" alt="">` : "<span></span>"}<span style="min-width:0">${esc(r.f.m.n)} ${!r.correct ? `<em>· ${esc(r.guessName)}${r.km ? `, ${fmt(r.km)} km` : ""}</em>` : ""}</span><span class="p">+${fmt(r.pts)}</span></li>`).join("")}</ol>
+    <ol class="log">${state.results.map(r => `<li><span class="${r.kind}">${ICON[r.kind]}</span>${thumb(r)}<span style="min-width:0">${label(r)}</span><span class="p">+${fmt(r.pts)}</span></li>`).join("")}</ol>
     <div class="endbtns"><button class="primary" id="againBtn">Play again ${ICON.arrow}</button><button class="ghost" id="setupBtn">Change setup</button></div>`;
   show("end");
   $("#againBtn").addEventListener("click", startGame);
